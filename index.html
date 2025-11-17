@@ -294,27 +294,10 @@
             margin-bottom: 20px;
             color: #333;
         }
-
-        @media (max-width: 768px) {
-            .header h1 {
-                font-size: 1.8em;
-            }
-
-            .stats-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .controls {
-                flex-direction: column;
-            }
-
-            .search-box {
-                width: 100%;
-            }
-        }
     </style>
 </head>
 <body>
+
     <div class="container">
         <div class="header">
             <h1>💰 Personal Expense Tracker</h1>
@@ -326,11 +309,16 @@
                 <div class="upload-icon">📁</div>
                 <h2>Drop your transaction file here</h2>
                 <p style="margin: 15px 0; color: #666;">or</p>
+
                 <button class="btn" onclick="document.getElementById('fileInput').click()">
                     Choose File
                 </button>
+
                 <input type="file" id="fileInput" accept=".txt">
-                <p style="margin-top: 15px; color: #999; font-size: 0.9em;">Supports .txt files</p>
+
+                <p style="margin-top: 15px; color: #999; font-size: 0.9em;">
+                    Supports .txt files (Google Pay Statement)
+                </p>
             </div>
         </div>
 
@@ -380,16 +368,18 @@
         </div>
     </div>
 
+    <!-- Chart.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+
     <script>
         let transactions = [];
-        let notes = {};
+        let notes = {}; // notes keyed by transactionId
         let chart = null;
 
         const uploadBox = document.getElementById('uploadBox');
         const fileInput = document.getElementById('fileInput');
 
-        // Drag and drop handlers
+        // Drag & drop UI
         uploadBox.addEventListener('dragover', (e) => {
             e.preventDefault();
             uploadBox.classList.add('dragover');
@@ -412,78 +402,81 @@
 
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
-            if (file) {
-                processFile(file);
-            }
+            if (file) processFile(file);
         });
 
         function processFile(file) {
             const reader = new FileReader();
             reader.onload = (e) => {
-                const content = e.target.result;
-                parseTransactions(content);
+                parseTransactions(e.target.result);
                 showDashboard();
             };
             reader.readAsText(file);
         }
 
+        /* ---------- PARSE: Google Pay 6-line blocks ---------- */
         function parseTransactions(content) {
             transactions = [];
-            const lines = content.split('\n');
-            let currentTransaction = null;
+            notes = {}; // reset notes for new file (they exist only per-session unless you change this)
+            const rawLines = content.split('\n');
+            // trim and remove empty lines but keep sequence
+            const lines = rawLines.map(l => l.trim()).filter(l => l !== "");
 
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
-
-                // Match date line
-                const dateMatch = line.match(/^([A-Za-z]{3}\s+\d{2},\s+\d{4})/);
+            let i = 0;
+            while (i < lines.length) {
+                // look for date like "02 Oct, 2025"
+                const dateMatch = lines[i].match(/^(\d{2}\s[A-Za-z]{3},\s\d{4})$/);
                 if (dateMatch) {
-                    if (currentTransaction) {
-                        transactions.push(currentTransaction);
+                    const date = lines[i];             // e.g., "02 Oct, 2025"
+                    const time = lines[i + 1] || "";  // e.g., "02:13 PM"
+                    const detailLine = lines[i + 2] || ""; // e.g., "Received from X"
+                    const utrLine = lines[i + 3] || "";    // e.g., "UPI Transaction ID: 123..."
+                    const bankLine = lines[i + 4] || "";   // e.g., "Paid to Axis Bank 0826" or "Paid by ..."
+                    const amountLine = lines[i + 5] || ""; // e.g., "₹38.17"
+
+                    const type = detailLine.startsWith("Received") ? "CREDIT" : "DEBIT";
+
+                    // parse amount safely
+                    const amount = parseFloat((amountLine || "").replace(/[₹,]/g, "")) || 0;
+
+                    // extract transaction id
+                    let transactionId = utrLine.replace("UPI Transaction ID:", "").trim();
+                    if (!transactionId) {
+                        // fallback: sometimes label might be "Transaction ID:" or other variants
+                        transactionId = utrLine.replace(/Transaction ID:|UPI Txn ID:|Txn ID:/i, "").trim();
                     }
-                    currentTransaction = {
-                        date: dateMatch[1],
-                        rawDate: new Date(dateMatch[1])
-                    };
-                    continue;
-                }
-
-                if (!currentTransaction) continue;
-
-                // Match transaction details
-                if (line.startsWith('Paid to') || line.startsWith('Received from') || line.startsWith('Payment to') || line.startsWith('Transfer to')) {
-                    const parts = line.split(/\s+(DEBIT|CREDIT)\s+/);
-                    if (parts.length >= 3) {
-                        currentTransaction.details = parts[0];
-                        currentTransaction.type = parts[1];
-                        currentTransaction.amount = parseFloat(parts[2].replace(/[₹,]/g, ''));
+                    if (!transactionId) {
+                        // generate a fallback unique id to allow notes binding
+                        transactionId = 'tx-' + i + '-' + Math.floor(Math.random() * 100000);
                     }
-                }
 
-                // Match Transaction ID
-                if (line.startsWith('Transaction ID')) {
-                    currentTransaction.transactionId = line.split('Transaction ID')[1].trim();
-                }
+                    // extract bank/account info
+                    const account = bankLine.replace(/Paid to|Paid by/gi, "").trim();
 
-                // Match UTR
-                if (line.startsWith('UTR No.')) {
-                    currentTransaction.utr = line.split('UTR No.')[1].trim();
-                }
+                    // details: show the detailLine + time to make it clearer
+                    const details = detailLine + (time ? " • " + time : "");
 
-                // Match payment method
-                if (line.startsWith('Paid by') || line.startsWith('Credited to')) {
-                    currentTransaction.account = line.split(/Paid by|Credited to/)[1].trim();
+                    transactions.push({
+                        date,
+                        rawDate: new Date(date),
+                        details,
+                        transactionId,
+                        amount,
+                        type,
+                        account
+                    });
+
+                    i += 6; // move to next 6-line block
+                } else {
+                    i++; // move forward until next matching date line
                 }
             }
 
-            if (currentTransaction) {
-                transactions.push(currentTransaction);
-            }
-
-            transactions = transactions.filter(t => t.type && t.amount);
+            // sort by date desc
             transactions.sort((a, b) => b.rawDate - a.rawDate);
         }
 
+        /* ---------- SHOW / STATS / RENDER ---------- */
         function showDashboard() {
             document.getElementById('uploadSection').style.display = 'none';
             document.getElementById('dashboard').style.display = 'block';
@@ -493,8 +486,8 @@
         }
 
         function updateStatistics() {
-            const totalCredits = transactions.filter(t => t.type === 'CREDIT').reduce((sum, t) => sum + t.amount, 0);
-            const totalDebits = transactions.filter(t => t.type === 'DEBIT').reduce((sum, t) => sum + t.amount, 0);
+            const totalCredits = transactions.filter(t => t.type === 'CREDIT').reduce((s, t) => s + t.amount, 0);
+            const totalDebits = transactions.filter(t => t.type === 'DEBIT').reduce((s, t) => s + t.amount, 0);
             const netBalance = totalCredits - totalDebits;
 
             document.getElementById('totalTransactions').textContent = transactions.length;
@@ -503,6 +496,7 @@
             document.getElementById('netBalance').textContent = '₹' + netBalance.toLocaleString('en-IN', {maximumFractionDigits: 2});
         }
 
+        /* ---------- RENDER with NOTES ---------- */
         function renderTransactions() {
             const container = document.getElementById('transactionsContainer');
             const searchTerm = document.getElementById('searchBox').value.toLowerCase();
@@ -510,14 +504,16 @@
             const sortFilter = document.getElementById('sortFilter').value;
 
             let filtered = transactions.filter(t => {
-                const matchesSearch = t.details.toLowerCase().includes(searchTerm);
+                const matchesSearch = (t.details || "").toLowerCase().includes(searchTerm) ||
+                                      (t.transactionId || "").toLowerCase().includes(searchTerm) ||
+                                      (t.account || "").toLowerCase().includes(searchTerm);
                 const matchesType = typeFilter === 'all' || t.type === typeFilter;
                 return matchesSearch && matchesType;
             });
 
-            // Sort
+            // sorting
             filtered.sort((a, b) => {
-                switch(sortFilter) {
+                switch (sortFilter) {
                     case 'date-asc': return a.rawDate - b.rawDate;
                     case 'date-desc': return b.rawDate - a.rawDate;
                     case 'amount-asc': return a.amount - b.amount;
@@ -537,115 +533,118 @@
                 return;
             }
 
-            container.innerHTML = filtered.map((t, index) => `
+            container.innerHTML = filtered.map((t, displayIndex) => {
+                // Use displayIndex for element ids — but keep notes keyed by transactionId
+                const note = notes[t.transactionId];
+                return `
                 <div class="transaction-item">
                     <div class="transaction-header">
                         <div class="transaction-details">
-                            <div class="transaction-name">${t.details}</div>
-                            <div class="transaction-date">📅 ${t.date}</div>
+                            <div class="transaction-name">${escapeHtml(t.details)}</div>
+                            <div class="transaction-date">📅 ${escapeHtml(t.date)}</div>
                         </div>
                         <div class="transaction-amount ${t.type.toLowerCase()}">
                             ${t.type === 'CREDIT' ? '+' : '-'}₹${t.amount.toLocaleString('en-IN', {maximumFractionDigits: 2})}
                         </div>
                     </div>
+
                     <div class="transaction-meta">
-                        <span>🆔 ${t.transactionId || 'N/A'}</span>
-                        <span>🏦 ${t.account || 'N/A'}</span>
+                        <span>🆔 ${escapeHtml(t.transactionId)}</span>
+                        <span>🏦 ${escapeHtml(t.account || 'N/A')}</span>
                     </div>
+
                     <div class="note-section">
-                        ${notes[t.transactionId] ? `
-                            <div class="note-display" id="note-display-${index}">
-                                📝 ${notes[t.transactionId]}
+                        ${note ? `
+                            <div class="note-display" id="note-display-${displayIndex}">
+                                📝 ${escapeHtml(note)}
                             </div>
-                            <button class="btn-small" onclick="editNote(${index}, '${t.transactionId}')">Edit Note</button>
+                            <button class="btn-small" onclick="editNote(${displayIndex}, '${t.transactionId.replace(/'/g, "\\'")}')">Edit Note</button>
                         ` : `
-                            <textarea class="note-input" id="note-input-${index}" placeholder="Add a note about this transaction..."></textarea>
-                            <button class="btn-small" onclick="saveNote(${index}, '${t.transactionId}')">Save Note</button>
+                            <textarea class="note-input" id="note-input-${displayIndex}" placeholder="Add a note about this transaction..."></textarea>
+                            <button class="btn-small" onclick="saveNote(${displayIndex}, '${t.transactionId.replace(/'/g, "\\'")}')">Save Note</button>
                         `}
                     </div>
                 </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
-        function saveNote(index, transactionId) {
-            const noteInput = document.getElementById(`note-input-${index}`);
-            const noteText = noteInput.value.trim();
-            if (noteText) {
-                notes[transactionId] = noteText;
-                renderTransactions();
-            }
+        /* ---------- Notes helpers (in-memory only) ---------- */
+        function saveNote(displayIndex, transactionId) {
+            const input = document.getElementById(`note-input-${displayIndex}`);
+            if (!input) return;
+            const text = input.value.trim();
+            if (text.length === 0) return;
+            notes[transactionId] = text;
+            renderTransactions();
         }
 
-        function editNote(index, transactionId) {
-            const currentNote = notes[transactionId];
+        function editNote(displayIndex, transactionId) {
+            const current = notes[transactionId];
+            // remove note and re-render to show textarea
             delete notes[transactionId];
             renderTransactions();
+
+            // after render, populate the textarea with previous note
             setTimeout(() => {
-                const noteInput = document.getElementById(`note-input-${index}`);
-                if (noteInput) {
-                    noteInput.value = currentNote;
-                    noteInput.focus();
+                const input = document.getElementById(`note-input-${displayIndex}`);
+                if (input) {
+                    input.value = current || "";
+                    input.focus();
                 }
             }, 100);
         }
 
+        /* ---------- Chart ---------- */
         function createChart() {
             const ctx = document.getElementById('monthlyChart').getContext('2d');
-            
             const monthlyData = {};
+
             transactions.forEach(t => {
-                const month = t.rawDate.toLocaleString('default', { month: 'short', year: 'numeric' });
-                if (!monthlyData[month]) {
-                    monthlyData[month] = { credits: 0, debits: 0 };
-                }
-                if (t.type === 'CREDIT') {
-                    monthlyData[month].credits += t.amount;
-                } else {
-                    monthlyData[month].debits += t.amount;
-                }
+                const key = t.rawDate.toLocaleString('default', { month: 'short', year: 'numeric' });
+                if (!monthlyData[key]) monthlyData[key] = { credits: 0, debits: 0 };
+                if (t.type === 'CREDIT') monthlyData[key].credits += t.amount;
+                else monthlyData[key].debits += t.amount;
             });
 
             const labels = Object.keys(monthlyData).sort();
             const creditData = labels.map(l => monthlyData[l].credits);
             const debitData = labels.map(l => monthlyData[l].debits);
 
-            if (chart) {
-                chart.destroy();
-            }
+            if (chart) chart.destroy();
 
             chart = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Credits',
-                        data: creditData,
-                        backgroundColor: 'rgba(17, 153, 142, 0.7)',
-                        borderColor: 'rgba(17, 153, 142, 1)',
-                        borderWidth: 2
-                    }, {
-                        label: 'Debits',
-                        data: debitData,
-                        backgroundColor: 'rgba(238, 9, 121, 0.7)',
-                        borderColor: 'rgba(238, 9, 121, 1)',
-                        borderWidth: 2
-                    }]
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Credits',
+                            data: creditData,
+                            backgroundColor: 'rgba(17,153,142,0.7)',
+                            borderColor: 'rgba(17,153,142,1)',
+                            borderWidth: 2
+                        },
+                        {
+                            label: 'Debits',
+                            data: debitData,
+                            backgroundColor: 'rgba(238,9,121,0.7)',
+                            borderColor: 'rgba(238,9,121,1)',
+                            borderWidth: 2
+                        }
+                    ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: true,
                     plugins: {
-                        legend: {
-                            position: 'top',
-                        }
+                        legend: { position: 'top' }
                     },
                     scales: {
                         y: {
                             beginAtZero: true,
                             ticks: {
-                                callback: function(value) {
-                                    return '₹' + value.toLocaleString('en-IN');
-                                }
+                                callback: function(value) { return '₹' + value.toLocaleString('en-IN'); }
                             }
                         }
                     }
@@ -653,33 +652,72 @@
             });
         }
 
+        /* ---------- Export CSV (includes notes) ---------- */
         function exportData() {
-            let csv = 'Date,Details,Type,Amount,Transaction ID,UTR,Account,Note\n';
+            // headers: Date,Details,Type,Amount,Transaction ID,Account,Note
+            const header = ['Date','Details','Type','Amount','Transaction ID','Account','Note'];
+            let rows = [header];
+
             transactions.forEach(t => {
                 const note = notes[t.transactionId] || '';
-                csv += `"${t.date}","${t.details}","${t.type}","${t.amount}","${t.transactionId || ''}","${t.utr || ''}","${t.account || ''}","${note}"\n`;
+                rows.push([
+                    t.date,
+                    t.details,
+                    t.type,
+                    t.amount,
+                    t.transactionId,
+                    t.account || '',
+                    note
+                ]);
             });
 
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
+            const csvContent = rows.map(r => r.map(cell => `"${(''+cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = 'expense_report.csv';
             a.click();
+            URL.revokeObjectURL(url);
         }
 
+        /* ---------- Reset ---------- */
         function resetApp() {
             transactions = [];
             notes = {};
+            if (chart) {
+                chart.destroy();
+                chart = null;
+            }
             document.getElementById('uploadSection').style.display = 'block';
             document.getElementById('dashboard').style.display = 'none';
-            document.getElementById('fileInput').value = '';
+            fileInput.value = '';
+            document.getElementById('transactionsContainer').innerHTML = '';
+            document.getElementById('totalTransactions').textContent = '0';
+            document.getElementById('totalCredits').textContent = '₹0';
+            document.getElementById('totalDebits').textContent = '₹0';
+            document.getElementById('netBalance').textContent = '₹0';
         }
 
-        // Add event listeners for filters
-        document.getElementById('searchBox').addEventListener('input', renderTransactions);
+        /* ---------- Utilities & Event Listeners ---------- */
+        // escape HTML to prevent broken layout if input contains special chars
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        document.getElementById('searchBox').addEventListener('input', () => {
+            renderTransactions();
+        });
         document.getElementById('typeFilter').addEventListener('change', renderTransactions);
         document.getElementById('sortFilter').addEventListener('change', renderTransactions);
+
     </script>
 </body>
 </html>
